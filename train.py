@@ -487,6 +487,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     if opt.device_str == "cuda":
                         torch.cuda.synchronize()
                     duration = time.time() - start_time
+                    p.step()
                     print("epoch:{}, iteration:{}, training time: {} sec.".format(epoch, i, duration))
                     batch_total_time += duration
                     batch_total_count += 1
