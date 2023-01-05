@@ -9,8 +9,8 @@ function main {
     set_environment
 
     # requirements
-    mkdir -p datasets
-    cp ${DATASET_DIR}  datasets/.
+    rm -rf datasets && mkdir -p datasets
+    cp -r ${DATASET_DIR} datasets/.
 
     # if multiple use 'xxx,xxx,xxx'
     model_name_list=($(echo "${model_name}" |sed 's/,/ /g'))
@@ -60,7 +60,7 @@ function generate_core {
         printf " ${OOB_EXEC_HEADER} \
 	    python train.py --data data/coco128.yaml --weights '' --cfg models/yolov5x.yaml \
 	        --batch-size ${batch_size} --precision ${precision} \
-	        --device ${device} --channels_last ${channesl_last} \
+	        --device ${device} --channels_last ${channels_last} \
                 ${addtion_options} \
         > ${log_file} 2>&1 &  \n" |tee -a ${excute_cmd_file}
         if [ "${numa_nodes_use}" == "0" ];then
