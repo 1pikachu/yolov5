@@ -60,11 +60,28 @@ from utils.plots import plot_evolve
 from utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, select_device, smart_DDP, smart_optimizer,
                                smart_resume, torch_distributed_zero_first)
 
-LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable/elastic/run.html
-RANK = int(os.getenv('RANK', -1))
-WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
+#LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable/elastic/run.html
+#RANK = int(os.getenv('RANK', -1))
+#WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
+LOCAL_RANK = -1  # https://pytorch.org/docs/stable/elastic/run.html
+RANK = -1
+WORLD_SIZE = 1
 GIT_INFO = check_git_info()
 
+
+def trace_handler(p):
+    output = p.key_averages().table(sort_by="self_cpu_time_total")
+    print(output)
+    import pathlib
+    timeline_dir = str(pathlib.Path.cwd()) + '/timeline/'
+    if not os.path.exists(timeline_dir):
+        try:
+            os.makedirs(timeline_dir)
+        except:
+            pass
+    timeline_file = timeline_dir + 'timeline-' + str(torch.backends.quantized.engine) + \
+            '-' + str(p.step_num) + '-' + str(os.getpid()) + '.json'
+    p.export_chrome_trace(timeline_file)
 
 def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictionary
     save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze = \
@@ -105,7 +122,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
     # Config
     plots = not evolve and not opt.noplots  # create plots
-    cuda = device.type != 'cpu'
+    # cuda = device.type != 'cpu'
+    cuda = opt.device_str == 'cuda'
     init_seeds(opt.seed + 1 + RANK, deterministic=True)
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
@@ -154,6 +172,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     accumulate = max(round(nbs / batch_size), 1)  # accumulate loss before optimizing
     hyp['weight_decay'] *= batch_size * accumulate / nbs  # scale weight_decay
     optimizer = smart_optimizer(model, opt.optimizer, hyp['lr0'], hyp['momentum'], hyp['weight_decay'])
+
+    datatype = torch.float16 if opt.precision == "float16" else torch.bfloat16 if opt.precision == "bfloat16" else torch.float32
+    if opt.device_str == "xpu":
+        model, optimizer = torch.xpu.optimize(model=model, optimizer=optimizer, dtype=datatype)
 
     # Scheduler
     if opt.cos_lr:
@@ -221,7 +243,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         if not resume:
             if not opt.noautoanchor:
                 check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)  # run AutoAnchor
-            model.half().float()  # pre-reduce anchor precision
+            # model.half().float()  # pre-reduce anchor precision
 
         callbacks.run('on_pretrain_routine_end', labels, names)
 
@@ -249,7 +271,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
     scheduler.last_epoch = start_epoch - 1  # do not move
-    scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    # scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
     compute_loss = ComputeLoss(model)  # init loss class
     callbacks.run('on_train_start')
@@ -257,7 +279,14 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 f'Using {train_loader.num_workers * WORLD_SIZE} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
-    for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+
+    if opt.channels_last:
+        model = model.to(memory_format=torch.channels_last)
+        print("---- use NHWC format")
+
+    total_time = 0.0
+    total_count = 0
+    for epoch in range(epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
         model.train()
 
@@ -279,69 +308,300 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
-            callbacks.run('on_train_batch_start')
-            ni = i + nb * epoch  # number integrated batches (since train start)
-            imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
 
-            # Warmup
-            if ni <= nw:
-                xi = [0, nw]  # x interp
-                # compute_loss.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)
-                accumulate = max(1, np.interp(ni, xi, [1, nbs / batch_size]).round())
-                for j, x in enumerate(optimizer.param_groups):
-                    # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
-                    x['lr'] = np.interp(ni, xi, [hyp['warmup_bias_lr'] if j == 0 else 0.0, x['initial_lr'] * lf(epoch)])
-                    if 'momentum' in x:
-                        x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
+        batch_total_time = 0.0
+        batch_total_count = 0
 
-            # Multi-scale
-            if opt.multi_scale:
-                sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
-                sf = sz / max(imgs.shape[2:])  # scale factor
-                if sf != 1:
-                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
-                    imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+        profile_len = nb // 2
+        if opt.profile and epoch == epochs // 2 and opt.device_str == "xpu":
+            for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+                callbacks.run('on_train_batch_start')
+                ni = i + nb * epoch  # number integrated batches (since train start)
 
-            # Forward
-            with torch.cuda.amp.autocast(amp):
-                pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                if RANK != -1:
-                    loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.
+                start_time = time.time()
+                imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
 
-            # Backward
-            scaler.scale(loss).backward()
+                # Warmup
+                if ni <= nw:
+                    xi = [0, nw]  # x interp
+                    # compute_loss.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)
+                    accumulate = max(1, np.interp(ni, xi, [1, nbs / batch_size]).round())
+                    for j, x in enumerate(optimizer.param_groups):
+                        # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
+                        x['lr'] = np.interp(ni, xi, [hyp['warmup_bias_lr'] if j == 0 else 0.0, x['initial_lr'] * lf(epoch)])
+                        if 'momentum' in x:
+                            x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
 
-            # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
-            if ni - last_opt_step >= accumulate:
-                scaler.unscale_(optimizer)  # unscale gradients
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
-                optimizer.zero_grad()
-                if ema:
-                    ema.update(model)
-                last_opt_step = ni
+                # Multi-scale
+                if opt.multi_scale:
+                    sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
+                    sf = sz / max(imgs.shape[2:])  # scale factor
+                    if sf != 1:
+                        ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
+                        imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
-            # Log
-            if RANK in {-1, 0}:
-                mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
-                mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
-                pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
-                                     (f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
-                callbacks.run('on_train_batch_end', model, ni, imgs, targets, paths, list(mloss))
-                if callbacks.stop_training:
-                    return
-            # end batch ------------------------------------------------------------------------------------------------
+                # Forward
+                if i == profile_len:
+                    with torch.autograd.profiler_legacy.profile(enabled=True, use_xpu=True, record_shapes=False) as prof:
+                        with torch.xpu.amp.autocast(enabled=True, dtype=datatype):
+                            pred = model(imgs)  # forward
+                            loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                            if RANK != -1:
+                                loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                            if opt.quad:
+                                loss *= 4.
+                else:
+                    with torch.xpu.amp.autocast(enabled=True, dtype=datatype):
+                        pred = model(imgs)  # forward
+                        loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                        if RANK != -1:
+                            loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                        if opt.quad:
+                            loss *= 4.
+
+                # Backward
+                #scaler.scale(loss).backward()
+                loss.backward()
+
+                # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
+                if ni - last_opt_step >= accumulate:
+                    #scaler.unscale_(optimizer)  # unscale gradients
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
+                    #scaler.step(optimizer)  # optimizer.step
+                    #scaler.update()
+                    optimizer.zero_grad()
+                    if ema:
+                        ema.update(model)
+                    last_opt_step = ni
+
+                loss = loss.cpu()
+                pred = [i.cpu() for i in pred]
+                torch.xpu.synchronize()
+                duration = time.time() - start_time
+                print("epoch:{}, iteration:{}, training time: {} sec.".format(epoch, i, duration))
+                batch_total_time += duration
+                batch_total_count += 1
+                if i == profile_len:
+                    import pathlib
+                    timeline_dir = str(pathlib.Path.cwd()) + '/timeline/'
+                    if not os.path.exists(timeline_dir):
+                        try:
+                            os.makedirs(timeline_dir)
+                        except:
+                            pass
+                    torch.save(prof.key_averages().table(sort_by="self_xpu_time_total"),
+                        timeline_dir+'profile.pt')
+                    torch.save(prof.key_averages(group_by_input_shape=True).table(),
+                        timeline_dir+'profile_detail.pt')
+                    torch.save(prof.table(sort_by="id", row_limit=100000),
+                        timeline_dir+'profile_detail_withId.pt')
+                    prof.export_chrome_trace(timeline_dir+"trace.json")
+
+                # Log
+                if RANK in {-1, 0}:
+                    mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                    mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
+                    pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
+                                         (f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
+                    callbacks.run('on_train_batch_end', model, ni, imgs, targets, paths, list(mloss))
+                    if callbacks.stop_training:
+                        return
+        elif opt.profile and epoch == epochs // 2 and opt.device_str != "xpu":
+            if opt.device_str == "cuda":
+                profile_act = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+            else:
+                profile_act = [torch.profiler.ProfilerActivity.CPU]
+            with torch.profiler.profile(
+                activities=profile_act,
+                record_shapes=True,
+                schedule=torch.profiler.schedule(
+                    wait=profile_len,
+                    warmup=2,
+                    active=1,
+                ),
+                on_trace_ready=trace_handler,
+            ) as p:
+                for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+                    callbacks.run('on_train_batch_start')
+                    ni = i + nb * epoch  # number integrated batches (since train start)
+
+                    if opt.channels_last:
+                        imgs = imgs.to(memory_format=torch.channels_last)
+                    start_time = time.time()
+                    imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
+
+                    # Warmup
+                    if ni <= nw:
+                        xi = [0, nw]  # x interp
+                        # compute_loss.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)
+                        accumulate = max(1, np.interp(ni, xi, [1, nbs / batch_size]).round())
+                        for j, x in enumerate(optimizer.param_groups):
+                            # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
+                            x['lr'] = np.interp(ni, xi, [hyp['warmup_bias_lr'] if j == 0 else 0.0, x['initial_lr'] * lf(epoch)])
+                            if 'momentum' in x:
+                                x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
+
+                    # Multi-scale
+                    if opt.multi_scale:
+                        sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
+                        sf = sz / max(imgs.shape[2:])  # scale factor
+                        if sf != 1:
+                            ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
+                            imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+
+                    # Forward
+                    if opt.device_str == "cuda":
+                        with torch.cuda.amp.autocast(enabled=True, dtype=datatype):
+                            pred = model(imgs)  # forward
+                            loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                            if RANK != -1:
+                                loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                            if opt.quad:
+                                loss *= 4.
+                    else:
+                        with torch.cpu.amp.autocast(enabled=True, dtype=datatype):
+                            pred = model(imgs)  # forward
+                            loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                            if RANK != -1:
+                                loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                            if opt.quad:
+                                loss *= 4.
+
+                    # Backward
+                    #scaler.scale(loss).backward()
+                    loss.backward()
+
+                    # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
+                    if ni - last_opt_step >= accumulate:
+                        #scaler.unscale_(optimizer)  # unscale gradients
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
+                        #scaler.step(optimizer)  # optimizer.step
+                        #scaler.update()
+                        optimizer.zero_grad()
+                        if ema:
+                            ema.update(model)
+                        last_opt_step = ni
+
+                    loss = loss.cpu()
+                    pred = [i.cpu() for i in pred]
+                    if opt.device_str == "cuda":
+                        torch.cuda.synchronize()
+                    duration = time.time() - start_time
+                    print("epoch:{}, iteration:{}, training time: {} sec.".format(epoch, i, duration))
+                    batch_total_time += duration
+                    batch_total_count += 1
+
+                    # Log
+                    if RANK in {-1, 0}:
+                        mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                        mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
+                        pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
+                                             (f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
+                        callbacks.run('on_train_batch_end', model, ni, imgs, targets, paths, list(mloss))
+                        if callbacks.stop_training:
+                            return
+        else:
+            for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+                callbacks.run('on_train_batch_start')
+                ni = i + nb * epoch  # number integrated batches (since train start)
+
+                if opt.channels_last and opt.device_str != "xpu":
+                    imgs = imgs.to(memory_format=torch.channels_last)
+                start_time = time.time()
+                imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
+
+                # Warmup
+                if ni <= nw:
+                    xi = [0, nw]  # x interp
+                    # compute_loss.gr = np.interp(ni, xi, [0.0, 1.0])  # iou loss ratio (obj_loss = 1.0 or iou)
+                    accumulate = max(1, np.interp(ni, xi, [1, nbs / batch_size]).round())
+                    for j, x in enumerate(optimizer.param_groups):
+                        # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
+                        x['lr'] = np.interp(ni, xi, [hyp['warmup_bias_lr'] if j == 0 else 0.0, x['initial_lr'] * lf(epoch)])
+                        if 'momentum' in x:
+                            x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
+
+                # Multi-scale
+                if opt.multi_scale:
+                    sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
+                    sf = sz / max(imgs.shape[2:])  # scale factor
+                    if sf != 1:
+                        ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
+                        imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+
+                # Forward
+                if opt.device_str == "cuda":
+                    with torch.cuda.amp.autocast(enabled=True, dtype=datatype):
+                        pred = model(imgs)  # forward
+                        loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                        if RANK != -1:
+                            loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                        if opt.quad:
+                            loss *= 4.
+                elif opt.device_str == "xpu":
+                    with torch.xpu.amp.autocast(enabled=True, dtype=datatype):
+                        pred = model(imgs)  # forward
+                        loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                        if RANK != -1:
+                            loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                        if opt.quad:
+                            loss *= 4.
+                else:
+                    with torch.cpu.amp.autocast(enabled=True, dtype=datatype):
+                        pred = model(imgs)  # forward
+                        loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                        if RANK != -1:
+                            loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                        if opt.quad:
+                            loss *= 4.
+
+                # Backward
+                #scaler.scale(loss).backward()
+                loss.backward()
+
+                # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
+                if ni - last_opt_step >= accumulate:
+                    #scaler.unscale_(optimizer)  # unscale gradients
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
+                    #scaler.step(optimizer)  # optimizer.step
+                    #scaler.update()
+                    optimizer.zero_grad()
+                    if ema:
+                        ema.update(model)
+                    last_opt_step = ni
+
+                loss = loss.cpu()
+                pred = [i.cpu() for i in pred]
+                if opt.device_str == "cuda":
+                    torch.cuda.synchronize()
+                elif opt.device_str == "xpu":
+                    torch.xpu.synchronize()
+                duration = time.time() - start_time
+                print("epoch:{}, iteration:{}, training time: {} sec.".format(epoch, i, duration))
+                batch_total_time += duration
+                batch_total_count += 1
+
+                # Log
+                if RANK in {-1, 0}:
+                    mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                    mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
+                    pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
+                                         (f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
+                    callbacks.run('on_train_batch_end', model, ni, imgs, targets, paths, list(mloss))
+                    if callbacks.stop_training:
+                        return
+        # end batch ------------------------------------------------------------------------------------------------
+        if epoch >= opt.num_warmup:
+            total_time += batch_total_time
+            total_count += batch_total_count
+            print("epoch-{} calcute perf".format(epoch))
 
         # Scheduler
         lr = [x['lr'] for x in optimizer.param_groups]  # for loggers
         scheduler.step()
 
-        if RANK in {-1, 0}:
+        #if RANK in {-1, 0}:
+        if 0:
             # mAP
             callbacks.run('on_train_epoch_end', epoch=epoch)
             ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'names', 'stride', 'class_weights'])
@@ -400,7 +660,16 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
         # end epoch ----------------------------------------------------------------------------------------------------
     # end training -----------------------------------------------------------------------------------------------------
-    if RANK in {-1, 0}:
+    batch_size = opt.batch_size
+    avg_time = total_time / total_count
+    latency = avg_time / batch_size * 1000
+    perf = batch_size / avg_time
+    print("total time:{}, total count:{}".format(total_time, total_count))
+    print('%d epoch training latency: %6.2f ms'%(0, latency))
+    print('%d epoch training Throughput: %6.2f fps'%(0, perf))
+
+    #if RANK in {-1, 0}:
+    if 0:
         LOGGER.info(f'\n{epoch - start_epoch + 1} epochs completed in {(time.time() - t0) / 3600:.3f} hours.')
         for f in last, best:
             if f.exists():
@@ -426,7 +695,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
         callbacks.run('on_train_end', last, best, epoch, results)
 
-    torch.cuda.empty_cache()
+    if opt.device_str == "cuda":
+        torch.cuda.empty_cache()
     return results
 
 
@@ -436,8 +706,6 @@ def parse_opt(known=False):
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='dataset.yaml path')
     parser.add_argument('--hyp', type=str, default=ROOT / 'data/hyps/hyp.scratch-low.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=100, help='total training epochs')
-    parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs, -1 for autobatch')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='train, val image size (pixels)')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
@@ -449,7 +717,6 @@ def parse_opt(known=False):
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
     parser.add_argument('--cache', type=str, nargs='?', const='ram', help='image --cache ram/disk')
     parser.add_argument('--image-weights', action='store_true', help='use weighted image selection for training')
-    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--optimizer', type=str, choices=['SGD', 'Adam', 'AdamW'], default='SGD', help='optimizer')
@@ -472,6 +739,18 @@ def parse_opt(known=False):
     parser.add_argument('--upload_dataset', nargs='?', const=True, default=False, help='Upload data, "val" option')
     parser.add_argument('--bbox_interval', type=int, default=-1, help='Set bounding-box image logging interval')
     parser.add_argument('--artifact_alias', type=str, default='latest', help='Version of dataset artifact to use')
+
+    # OOB
+    parser.add_argument('--epochs', type=int, default=10, help='total training epochs')
+    parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs, -1 for autobatch')
+    parser.add_argument('--precision', default="float32", type=str, help='precision')
+    parser.add_argument('--channels_last', default=1, type=int, help='Use NHWC or not')
+    #parser.add_argument('--jit', action='store_true', default=False, help='enable JIT')
+    parser.add_argument('--profile', action='store_true', default=False, help='collect timeline')
+    #parser.add_argument('--num_iter', default=200, type=int, help='test iterations')
+    parser.add_argument('--num_warmup', default=3, type=int, help='test warmup')
+    parser.add_argument('--device', default='cpu', type=str, help='cpu, cuda or xpu')
+    #parser.add_argument('--nv_fuser', action='store_true', default=False, help='enable nv fuser')
 
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
@@ -510,7 +789,14 @@ def main(opt, callbacks=Callbacks()):
         opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
 
     # DDP mode
-    device = select_device(opt.device, batch_size=opt.batch_size)
+    # device = select_device(opt.device, batch_size=opt.batch_size)
+    opt.device_str = opt.device
+    if opt.device == "xpu":
+        import intel_extension_for_pytorch
+    elif opt.device == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = False
+    device = torch.device(opt.device_str)
+
     if LOCAL_RANK != -1:
         msg = 'is not compatible with YOLOv5 Multi-GPU DDP training'
         assert not opt.image_weights, f'--image-weights {msg}'
