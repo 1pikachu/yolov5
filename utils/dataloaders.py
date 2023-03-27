@@ -314,6 +314,8 @@ class LoadImages:
             im = im.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
             im = np.ascontiguousarray(im)  # contiguous
 
+        # fix dynamicShape
+        im = np.random.randn(1, 3, *self.img_size)
         return path, im, im0, self.cap, s
 
     def _new_video(self, path):
