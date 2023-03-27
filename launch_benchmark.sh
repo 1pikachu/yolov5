@@ -16,6 +16,12 @@ function main {
     model_name_list=($(echo "${model_name}" |sed 's/,/ /g'))
     batch_size_list=($(echo "${batch_size}" |sed 's/,/ /g'))
 
+    if [[ "${mode_name}" == "train" ]];then
+	exec_cmd=" train.py --data data/coco128.yaml --weights '' --cfg models/yolov5x.yaml "
+    else
+	exec_cmd=" detect.py --weights ${CKPT_DIR} --source ${DATASET_INF_DIR} \
+		--jit --num_iter ${num_iter} --num_warmup ${num_warmup} "
+    fi
     # generate benchmark
     for model_name in ${model_name_list[@]}
     do
@@ -56,7 +62,7 @@ function generate_core {
 	    fi
 	fi
         printf " ${OOB_EXEC_HEADER} \
-	    python train.py --data data/coco128.yaml --weights '' --cfg models/yolov5x.yaml \
+	    python ${exec_cmd} \
 	        --batch-size ${batch_size} --precision ${precision} \
 	        --device ${device} --channels_last ${channels_last} \
                 ${addtion_options} \

@@ -108,7 +108,7 @@ def run(
     else:
         device = select_device(device)
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=False)
-    if channels_last:
+    if channels_last or device_str == "cuda":
         try:
             model = model.to(memory_format=torch.channels_last)
             print("---- Use NHWC model")
@@ -199,6 +199,10 @@ def run(
                         tic = time.time()
                         im = im.to(device_str)
                         pred = model(im, augment=augment, visualize=visualize)
+                        if device_str == "xpu":
+                            torch.xpu.synchronize()
+                        elif device_str == "cuda":
+                            torch.cuda.synchronize()
                         toc = time.time()
             if profile and device_str == "cuda":
                 p.step()
