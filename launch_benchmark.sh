@@ -17,10 +17,12 @@ function main {
     batch_size_list=($(echo "${batch_size}" |sed 's/,/ /g'))
 
     if [[ "${mode_name}" == "train" ]];then
-	exec_cmd=" train.py --data data/coco128.yaml --weights '' --cfg models/yolov5x.yaml "
+	exec_cmd=" train.py --data data/coco128.yaml --weights '' \
+		--cfg models/yolov5x.yaml --device ${device} "
     else
 	exec_cmd=" detect.py --weights ${CKPT_DIR} --source ${DATASET_INF_DIR} \
-		--jit --num_iter ${num_iter} --num_warmup ${num_warmup} "
+		--jit --num_iter ${num_iter} --num_warmup ${num_warmup} \
+		--device_str ${device} "
     fi
     # generate benchmark
     for model_name in ${model_name_list[@]}
@@ -64,7 +66,7 @@ function generate_core {
         printf " ${OOB_EXEC_HEADER} \
 	    python ${exec_cmd} \
 	        --batch-size ${batch_size} --precision ${precision} \
-	        --device ${device} --channels_last ${channels_last} \
+	        --channels_last ${channels_last} \
                 ${addtion_options} \
         > ${log_file} 2>&1 &  \n" |tee -a ${excute_cmd_file}
         if [ "${numa_nodes_use}" == "0" ];then

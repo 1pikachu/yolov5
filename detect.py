@@ -88,6 +88,7 @@ def run(
         profile=False,
         jit=True,
         nv_fuser=False,
+        batch_size=1,    # hard code to 1
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -103,10 +104,8 @@ def run(
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
     # Load model
-    if device_str == "hpu":
-        device = torch.device("hpu")
-    else:
-        device = select_device(device)
+    #device = select_device(device)
+    device = torch.device(device_str)
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=False)
     if channels_last or device_str == "cuda":
         try:
@@ -120,6 +119,7 @@ def run(
         fuser_mode = "none"
     print("---- fuser mode:", fuser_mode)
     datatype = torch.float16 if precision == "float16" else torch.bfloat16 if precision == "bfloat16" else torch.float32
+    model.eval()
     if device_str == "xpu":
         model = ipex.optimize(model, dtype=datatype, inplace=True)
         print("---- enable ipex optimize")
@@ -143,7 +143,7 @@ def run(
     iter_count = 0
     total_time = 0.0
     profile_iter = num_iter // 2
-    model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
+    #model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
 
     import contextlib
@@ -176,16 +176,19 @@ def run(
 
     with context_func(profile if device_str == "cuda" else False, device_str, profile_iter, fuser_mode) as p:
         for path, im, im0s, vid_cap, s in dataset:
+            if iter_count == num_iter:
+                break
             with dt[0]:
-                im = torch.from_numpy(im).to(model.device)
+                im = torch.from_numpy(im)
                 im = im.float()  # uint8 to fp16/32
                 im /= 255  # 0 - 255 to 0.0 - 1.0
                 if len(im.shape) == 3:
                     im = im[None]  # expand for batch dim
                 if iter_count == 0 and jit:
                     try:
-                        im = im.to(device_str)
-                        model = torch.jit.trace(model, im, check_trace=False)
+                        with torch.autocast(device_type=device_str, enabled=True if precision != "float32" else False, dtype=datatype):
+                            im = im.to(device_str)
+                            model = torch.jit.trace(model, im, check_trace=False)
                         print("---- JIT trace enable.")
                     except (RuntimeError, TypeError) as e:
                         print("---- JIT trace disable.")
