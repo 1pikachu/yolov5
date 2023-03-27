@@ -359,6 +359,7 @@ def parse_opt():
     parser.add_argument('--profile', action='store_true', help='profile')
     parser.add_argument('--jit', action='store_true')
     parser.add_argument('--nv_fuser', action='store_true')
+    parser.add_argument('--batch-size', default=1, type=int)
 
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
