@@ -9,14 +9,14 @@ function main {
     set_environment
 
     # requirements
-    rm -rf datasets && mkdir -p datasets
-    cp -r ${DATASET_DIR} datasets/.
 
     # if multiple use 'xxx,xxx,xxx'
     model_name_list=($(echo "${model_name}" |sed 's/,/ /g'))
     batch_size_list=($(echo "${batch_size}" |sed 's/,/ /g'))
 
     if [[ "${mode_name}" == "train" ]];then
+    	rm -rf datasets && mkdir -p datasets
+    	cp -r ${DATASET_DIR} datasets/.
 	exec_cmd=" train.py --data data/coco128.yaml --weights '' \
 		--cfg models/yolov5x.yaml --device ${device} "
     else
