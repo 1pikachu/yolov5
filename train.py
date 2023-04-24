@@ -350,6 +350,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                 loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                             if opt.quad:
                                 loss *= 4.
+                        loss.backward()
                 else:
                     with torch.xpu.amp.autocast(enabled=True, dtype=datatype):
                         pred = model(imgs)  # forward
@@ -359,9 +360,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                         if opt.quad:
                             loss *= 4.
 
-                # Backward
-                #scaler.scale(loss).backward()
-                loss.backward()
+                    # Backward
+                    #scaler.scale(loss).backward()
+                    loss.backward()
 
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
                 if ni - last_opt_step >= accumulate:
