@@ -9,7 +9,7 @@ function main {
     set_environment
 
     # requirements
-    pip install ipython==8.8.0
+    pip install ipython==8.8.0 seaborn==0.12.2
 
     # if multiple use 'xxx,xxx,xxx'
     model_name_list=($(echo "${model_name}" |sed 's/,/ /g'))
