@@ -89,6 +89,8 @@ def run(
         jit=True,
         nv_fuser=False,
         batch_size=1,    # hard code to 1
+        compile=False,
+        backend="inductor",
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -123,6 +125,9 @@ def run(
     if device_str == "xpu":
         model = ipex.optimize(model, dtype=datatype, inplace=True)
         print("---- enable ipex optimize")
+    if compile:
+        print("----enable compiler")
+        model = torch.compile(model, backend=backend, options={"freezing": True})
 
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
@@ -363,6 +368,8 @@ def parse_opt():
     parser.add_argument('--jit', action='store_true')
     parser.add_argument('--nv_fuser', action='store_true')
     parser.add_argument('--batch-size', default=1, type=int)
+    parser.add_argument('--compile', action='store_true', default=False, help='compile model')
+    parser.add_argument('--backend', default="inductor", type=str, help='backend')
 
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
