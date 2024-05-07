@@ -22,7 +22,7 @@ function main {
 		    --cfg models/yolov5x.yaml --device ${device} "
     else
 	    exec_cmd=" detect.py --weights ${CKPT_DIR} --source ${DATASET_INF_DIR} \
-		    --jit --num_iter ${num_iter} --num_warmup ${num_warmup} \
+		    --num_iter ${num_iter} --num_warmup ${num_warmup} \
 		    --device_str ${device} "
     fi
     # generate benchmark
@@ -65,6 +65,11 @@ function generate_core {
             fi
         elif [ "${device}" == "xpu" ];then
             OOB_EXEC_HEADER=" ZE_AFFINITY_MASK=${i} "
+        fi
+        if [[ "${addtion_options}" =~ "--compile" ]];then
+            echo "run with compile"
+        elif [[ "${mode_name}" == "realtime" ]];then
+            addtion_options+=" --jit "
         fi
         printf " ${OOB_EXEC_HEADER} \
 	        python ${exec_cmd} \
