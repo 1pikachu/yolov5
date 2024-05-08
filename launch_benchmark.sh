@@ -9,7 +9,7 @@ function main {
     set_environment
 
     # requirements
-    pip install ipython==8.8.0 seaborn==0.12.2
+    pip install ipython==8.8.0 seaborn==0.12.2 opencv-python==4.8.0.74
 
     # if multiple use 'xxx,xxx,xxx'
     model_name_list=($(echo "${model_name}" |sed 's/,/ /g'))
