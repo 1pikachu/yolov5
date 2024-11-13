@@ -91,6 +91,7 @@ def run(
         batch_size=1,    # hard code to 1
         compile=False,
         backend="inductor",
+        ipex=False,
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -122,7 +123,7 @@ def run(
     print("---- fuser mode:", fuser_mode)
     datatype = torch.float16 if precision == "float16" else torch.bfloat16 if precision == "bfloat16" else torch.float32
     model.eval()
-    if device_str == "xpu":
+    if device_str == "xpu" and ipex:
         model = ipex.optimize(model, dtype=datatype, inplace=True)
         print("---- enable ipex optimize")
     if compile:
@@ -370,6 +371,7 @@ def parse_opt():
     parser.add_argument('--batch-size', default=1, type=int)
     parser.add_argument('--compile', action='store_true', default=False, help='compile model')
     parser.add_argument('--backend', default="inductor", type=str, help='backend')
+    parser.add_argument('--ipex', action='store_true', default=False)
 
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
@@ -384,8 +386,9 @@ def main(opt):
 
 if __name__ == "__main__":
     opt = parse_opt()
-    if opt.device_str == "xpu":
+    if opt.device_str == "xpu" and opt.ipex:
         import intel_extension_for_pytorch as ipex
+        print("Use IPEX")
     elif opt.device_str == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = False
     elif opt.device_str == "hpu":

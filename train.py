@@ -174,7 +174,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     optimizer = smart_optimizer(model, opt.optimizer, hyp['lr0'], hyp['momentum'], hyp['weight_decay'])
 
     datatype = torch.float16 if opt.precision == "float16" else torch.bfloat16 if opt.precision == "bfloat16" else torch.float32
-    if opt.device_str == "xpu":
+    if opt.device_str == "xpu" and opt.ipex:
         model, optimizer = torch.xpu.optimize(model=model, optimizer=optimizer, dtype=datatype)
 
     # Scheduler
@@ -753,6 +753,7 @@ def parse_opt(known=False):
     parser.add_argument('--num_warmup', default=3, type=int, help='test warmup')
     parser.add_argument('--device', default='cpu', type=str, help='cpu, cuda or xpu')
     #parser.add_argument('--nv_fuser', action='store_true', default=False, help='enable nv fuser')
+    parser.add_argument('--ipex', action='store_true', default=False)
 
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
@@ -793,8 +794,9 @@ def main(opt, callbacks=Callbacks()):
     # DDP mode
     # device = select_device(opt.device, batch_size=opt.batch_size)
     opt.device_str = opt.device
-    if opt.device == "xpu":
+    if opt.device == "xpu" opt.ipex:
         import intel_extension_for_pytorch
+        print("Use IPEX")
     elif opt.device == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = False
     device = torch.device(opt.device_str)
