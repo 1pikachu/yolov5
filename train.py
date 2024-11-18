@@ -794,7 +794,7 @@ def main(opt, callbacks=Callbacks()):
     # DDP mode
     # device = select_device(opt.device, batch_size=opt.batch_size)
     opt.device_str = opt.device
-    if opt.device == "xpu" opt.ipex:
+    if opt.device == "xpu" and opt.ipex:
         import intel_extension_for_pytorch
         print("Use IPEX")
     elif opt.device == "cuda":
