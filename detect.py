@@ -91,7 +91,7 @@ def run(
         batch_size=1,    # hard code to 1
         compile=False,
         backend="inductor",
-        ipex=False,
+        use_ipex=False,
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -123,7 +123,7 @@ def run(
     print("---- fuser mode:", fuser_mode)
     datatype = torch.float16 if precision == "float16" else torch.bfloat16 if precision == "bfloat16" else torch.float32
     model.eval()
-    if device_str == "xpu" and ipex:
+    if device_str == "xpu" and use_ipex:
         model = ipex.optimize(model, dtype=datatype, inplace=True)
         print("---- enable ipex optimize")
     if compile:
@@ -394,4 +394,4 @@ if __name__ == "__main__":
     elif opt.device_str == "hpu":
         import habana_frameworks.torch.core as htcore
 
-    main(opt)
+    main(opt, use_ipex=opt.ipex)
