@@ -371,7 +371,7 @@ def parse_opt():
     parser.add_argument('--batch-size', default=1, type=int)
     parser.add_argument('--compile', action='store_true', default=False, help='compile model')
     parser.add_argument('--backend', default="inductor", type=str, help='backend')
-    parser.add_argument('--ipex', action='store_true', default=False)
+    parser.add_argument('--ipex', dest="use_ipex", action='store_true', default=False)
 
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
@@ -386,7 +386,7 @@ def main(opt):
 
 if __name__ == "__main__":
     opt = parse_opt()
-    if opt.device_str == "xpu" and opt.ipex:
+    if opt.device_str == "xpu" and opt.use_ipex:
         import intel_extension_for_pytorch as ipex
         print("Use IPEX")
     elif opt.device_str == "cuda":
@@ -394,4 +394,4 @@ if __name__ == "__main__":
     elif opt.device_str == "hpu":
         import habana_frameworks.torch.core as htcore
 
-    main(opt, use_ipex=opt.ipex)
+    main(opt)
