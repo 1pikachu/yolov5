@@ -343,7 +343,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 # Forward
                 if i == profile_len:
                     with torch.autograd.profiler_legacy.profile(enabled=True, use_xpu=True, record_shapes=False) as prof:
-                        with torch.autocast(enabled=True, dtype=datatype):
+                        with torch.autocast(enabled=True, dtype=datatype, device_type=opt.device_str):
                             pred = model(imgs)  # forward
                             loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                             if RANK != -1:
@@ -352,7 +352,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                 loss *= 4.
                         loss.backward()
                 else:
-                    with torch.autocast(enabled=True, dtype=datatype):
+                    with torch.autocast(enabled=True, dtype=datatype, device_type=opt.device_str):
                         pred = model(imgs)  # forward
                         loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                         if RANK != -1:
@@ -452,7 +452,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
                     # Forward
                     if opt.device_str == "cuda":
-                        with torch.autocast(enabled=True, dtype=datatype):
+                        with torch.autocast(enabled=True, dtype=datatype, device_type=opt.device_str):
                             pred = model(imgs)  # forward
                             loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                             if RANK != -1:
@@ -460,7 +460,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                             if opt.quad:
                                 loss *= 4.
                     else:
-                        with torch.autocast(enabled=True, dtype=datatype):
+                        with torch.autocast(enabled=True, dtype=datatype, device_type=opt.device_str):
                             pred = model(imgs)  # forward
                             loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                             if RANK != -1:
@@ -533,7 +533,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
                 # Forward
                 if opt.device_str == "cuda":
-                    with torch.autocast(enabled=True, dtype=datatype):
+                    with torch.autocast(enabled=True, dtype=datatype, device_type=opt.device_str):
                         pred = model(imgs)  # forward
                         loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                         if RANK != -1:
@@ -541,7 +541,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                         if opt.quad:
                             loss *= 4.
                 elif opt.device_str == "xpu":
-                    with torch.autocast(enabled=True, dtype=datatype):
+                    with torch.autocast(enabled=True, dtype=datatype, device_type=opt.device_str):
                         pred = model(imgs)  # forward
                         loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                         if RANK != -1:
@@ -549,7 +549,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                         if opt.quad:
                             loss *= 4.
                 else:
-                    with torch.autocast(enabled=True, dtype=datatype):
+                    with torch.autocast(enabled=True, dtype=datatype, device_type=opt.device_str):
                         pred = model(imgs)  # forward
                         loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                         if RANK != -1:
