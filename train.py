@@ -507,7 +507,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 callbacks.run('on_train_batch_start')
                 ni = i + nb * epoch  # number integrated batches (since train start)
 
-                if opt.channels_last and opt.device_str != "xpu":
+                if opt.channels_last:
                     imgs = imgs.to(memory_format=torch.channels_last)
                 start_time = time.time()
                 imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
